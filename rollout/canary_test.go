@@ -1324,6 +1324,76 @@ func TestCanaryRolloutStatusHPAStatusFields(t *testing.T) {
 	assert.JSONEq(t, calculatePatch(r2, expectedPatchWithSub), patch)
 }
 
+func TestCanaryRolloutStatusHPAStatusFields_DynamicStableScale(t *testing.T) {
+	f := newFixture(t)
+	defer f.Close()
+
+	steps := []v1alpha1.CanaryStep{
+		{
+			SetWeight: pointer.Int32Ptr(20),
+		}, {
+			Pause: &v1alpha1.RolloutPause{},
+		},
+	}
+	r1 := newCanaryRollout("foo", 5, nil, steps, pointer.Int32Ptr(1), intstr.FromInt(1), intstr.FromInt(0))
+	r1.Spec.Strategy.Canary.DynamicStableScale = true
+	r1.Spec.Strategy.Canary.TrafficRouting = &v1alpha1.RolloutTrafficRouting{}
+	r1.Spec.Strategy.Canary.CanaryService = "canary"
+	r1.Spec.Strategy.Canary.StableService = "stable"
+	r1.Status.ReadyReplicas = 4
+	r1.Status.AvailableReplicas = 4
+
+	r2 := bumpVersion(r1)
+	progressingCondition, _ := newProgressingCondition(conditions.RolloutPausedReason, r2, "")
+	conditions.SetRolloutCondition(&r2.Status, progressingCondition)
+
+	pausedCondition, _ := newPausedCondition(true)
+	conditions.SetRolloutCondition(&r2.Status, pausedCondition)
+
+	rs1 := newReplicaSetWithStatus(r1, 4, 4)
+	rs2 := newReplicaSetWithStatus(r2, 1, 1)
+
+	rs1PodHash := rs1.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
+	rs2PodHash := rs2.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
+	canarySelector := map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: rs2PodHash}
+	stableSelector := map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: rs1PodHash}
+	canarySvc := newService("canary", 80, canarySelector, r1)
+	stableSvc := newService("stable", 80, stableSelector, r1)
+
+	f.kubeobjects = append(f.kubeobjects, rs1, rs2, canarySvc, stableSvc)
+	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2)
+
+	r2 = updateCanaryRolloutStatus(r2, rs1PodHash, 5, 1, 4, true)
+	r2.Status.StableRS = rs1PodHash
+	r2.Status.Selector = metav1.FormatLabelSelector(rs2.Spec.Selector)
+	r2.Status.Canary.Weights = &v1alpha1.TrafficWeights{
+		Canary: v1alpha1.WeightDestination{
+			Weight:          20,
+			ServiceName:     "canary",
+			PodTemplateHash: rs2PodHash,
+		},
+		Stable: v1alpha1.WeightDestination{
+			Weight:          80,
+			ServiceName:     "stable",
+			PodTemplateHash: rs1PodHash,
+		},
+	}
+	f.rolloutLister = append(f.rolloutLister, r2)
+	f.objects = append(f.objects, r2)
+
+	expectedPatchWithSub := fmt.Sprintf(`{
+		"status":{
+			"selector":"foo=bar,%s=%s"
+		}
+	}`, v1alpha1.DefaultRolloutUniqueLabelKey, rs1PodHash) // Note: HPAReplicas is not patched as this remains the same (4)
+
+	index := f.expectPatchRolloutActionWithPatch(r2, expectedPatchWithSub)
+	f.run(getKey(r2, t))
+
+	patch := f.getPatchedRolloutWithoutConditions(index)
+	assert.JSONEq(t, calculatePatch(r2, expectedPatchWithSub), patch)
+}
+
 func TestCanaryRolloutWithCanaryService(t *testing.T) {
 	f := newFixture(t)
 	defer f.Close()

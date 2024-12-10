@@ -358,8 +358,19 @@ func (c *rolloutContext) completedCurrentCanaryStep() bool {
 func (c *rolloutContext) syncRolloutStatusCanary() error {
 	newStatus := c.calculateBaseStatus()
 	newStatus.AvailableReplicas = replicasetutil.GetAvailableReplicaCountForReplicaSets(c.allRSs)
-	newStatus.HPAReplicas = replicasetutil.GetActualReplicaCountForReplicaSets(c.allRSs)
-	newStatus.Selector = metav1.FormatLabelSelector(c.rollout.Spec.Selector)
+
+	if !c.rollout.Spec.Strategy.Canary.DynamicStableScale && c.stableRS != nil {
+		// When stable/canary ReplicaSets are not being dynamically scaled, HPA
+		// should only operate over the stable ReplicaSet to avoid HPA trying to
+		// scale as a result of the recommended replica count based on all ready
+		// pods.
+		newStatus.HPAReplicas = c.stableRS.Status.Replicas
+		newStatus.Selector = metav1.FormatLabelSelector(c.stableRS.Spec.Selector)
+	} else {
+		newStatus.HPAReplicas = replicasetutil.GetActualReplicaCountForReplicaSets(c.allRSs)
+		newStatus.Selector = metav1.FormatLabelSelector(c.rollout.Spec.Selector)
+	}
+
 	newStatus.Canary.StablePingPong = c.rollout.Status.Canary.StablePingPong
 	newStatus.Canary.StepPluginStatuses = c.rollout.Status.Canary.StepPluginStatuses
 	c.stepPluginContext.updateStatus(&newStatus)
